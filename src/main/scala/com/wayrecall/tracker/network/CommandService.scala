@@ -4,11 +4,21 @@ import zio.*
 import zio.json.*
 import com.wayrecall.tracker.domain.*
 import com.wayrecall.tracker.storage.{RedisClient, KafkaProducer}
-import java.time.Instant
-import java.util.concurrent.ConcurrentHashMap
+
+/**
+ * Pending command with its promise
+ */
+private[network] final case class PendingCommand(
+    command: Command,
+    promise: Promise[Throwable, CommandResult],
+    createdAt: Long
+)
 
 /**
  * Сервис для управления командами на GPS трекеры
+ * 
+ * ✅ Чисто функциональный: использует ZIO Ref вместо ConcurrentHashMap
+ * ✅ Нет var, while, mutable state
  * 
  * Workflow:
  * 1. Backend API → Redis PUBLISH commands:{imei}
@@ -44,12 +54,12 @@ object CommandService:
     ZIO.serviceWithZIO(_.handleCommandResponse(imei, response))
   
   /**
-   * Live реализация
+   * Live реализация - чисто функциональная!
    */
   final case class Live(
       redisClient: RedisClient,
       connectionRegistry: ConnectionRegistry,
-      pendingCommands: ConcurrentHashMap[String, Promise[Throwable, CommandResult]],
+      pendingCommandsRef: Ref[Map[String, PendingCommand]],
       commandTimeout: Duration
   ) extends CommandService:
     
@@ -68,19 +78,15 @@ object CommandService:
         
         // 3. Создать Promise для ожидания ответа
         promise <- Promise.make[Throwable, CommandResult]
-        _ <- ZIO.succeed(pendingCommands.put(command.commandId, promise))
+        now <- Clock.currentTime(java.util.concurrent.TimeUnit.MILLISECONDS)
+        pendingCmd = PendingCommand(command, promise, now)
+        _ <- pendingCommandsRef.update(_ + (command.commandId -> pendingCmd))
         
         // 4. Отправить на трекер
         _ <- ZIO.attempt(entry.ctx.writeAndFlush(buffer))
         
         // 5. Опубликовать статус "Sent"
-        sentResult = CommandResult(
-          commandId = command.commandId,
-          imei = command.imei,
-          status = CommandStatus.Sent,
-          message = None,
-          timestamp = Instant.now()
-        )
+        sentResult <- createResult(command, CommandStatus.Sent, None)
         _ <- redisClient.publish(
           s"$RESULTS_CHANNEL_PREFIX${command.imei}",
           sentResult.toJson
@@ -94,20 +100,20 @@ object CommandService:
           .flatMap {
             case Some(r) => ZIO.succeed(r)
             case None =>
-              val timeoutResult = CommandResult(
-                commandId = command.commandId,
-                imei = command.imei,
-                status = CommandStatus.Timeout,
-                message = Some(s"Tracker did not respond within ${commandTimeout.toSeconds}s"),
-                timestamp = Instant.now()
-              )
-              // Публикуем результат таймаута
-              redisClient.publish(
-                s"$RESULTS_CHANNEL_PREFIX${command.imei}",
-                timeoutResult.toJson
-              ).as(timeoutResult)
+              for
+                timeoutResult <- createResult(
+                  command, 
+                  CommandStatus.Timeout,
+                  Some(s"Tracker did not respond within ${commandTimeout.toSeconds}s")
+                )
+                // Публикуем результат таймаута
+                _ <- redisClient.publish(
+                  s"$RESULTS_CHANNEL_PREFIX${command.imei}",
+                  timeoutResult.toJson
+                )
+              yield timeoutResult
           }
-          .ensuring(ZIO.succeed(pendingCommands.remove(command.commandId)))
+          .ensuring(pendingCommandsRef.update(_ - command.commandId))
         
       yield result
     
@@ -125,69 +131,80 @@ object CommandService:
           connected <- connectionRegistry.isConnected(command.imei)
           
           _ <- (if connected then
-                  sendCommand(command)
-                    .catchAll(e => ZIO.logError(s"Failed to send command: ${e.getMessage}"))
-                else
-                  ZIO.suspend {
-                    // Трекер не подключен - публикуем ошибку
-                    val failedResult = CommandResult(
-                      commandId = command.commandId,
-                      imei = command.imei,
-                      status = CommandStatus.Failed,
-                      message = Some(s"Tracker ${command.imei} is not connected"),
-                      timestamp = Instant.now()
-                    )
-                    redisClient.publish(
-                      s"$RESULTS_CHANNEL_PREFIX${command.imei}",
-                      failedResult.toJson
-                    ) *> ZIO.logWarning(s"Tracker ${command.imei} not connected, command ${command.commandId} failed")
-                  }
-               )
+                 sendCommand(command)
+                   .catchAll(e => ZIO.logError(s"Failed to send command: ${e.getMessage}"))
+               else
+                 // Трекер не подключен - публикуем ошибку
+                 for
+                   failedResult <- createResult(
+                     command,
+                     CommandStatus.Failed,
+                     Some(s"Tracker ${command.imei} is not connected")
+                   )
+                   _ <- redisClient.publish(
+                     s"$RESULTS_CHANNEL_PREFIX${command.imei}",
+                     failedResult.toJson
+                   )
+                   _ <- ZIO.logWarning(s"Tracker ${command.imei} not connected, command ${command.commandId} failed")
+                 yield ())
         yield ()).catchAll(e => ZIO.logError(s"Error processing command: ${e.getMessage}"))
       }
     
     override def handleCommandResponse(imei: String, response: Array[Byte]): Task[Unit] =
-      ZIO.attempt {
-        // Простая логика: ищем pending команду для этого IMEI
-        // В реальности нужно парсить commandId из response
+      for
+        // Находим pending команду для этого IMEI (чисто функционально!)
+        pending <- pendingCommandsRef.get
         
-        // Находим первую pending команду для этого IMEI
-        val pendingForImei = pendingCommands.entrySet().iterator()
-        var found = false
+        // Ищем первую pending команду для этого IMEI
+        maybeEntry = pending.values
+          .filter(_.command.imei == imei)
+          .toList
+          .sortBy(_.createdAt)
+          .headOption
         
-        while pendingForImei.hasNext && !found do
-          val entry = pendingForImei.next()
-          // Если команда для этого IMEI (нужна дополнительная логика маппинга)
-          val promise = entry.getValue
-          val commandId = entry.getKey
-          
-          val result = CommandResult(
-            commandId = commandId,
-            imei = imei,
-            status = CommandStatus.Acked,
-            message = Some(new String(response, "UTF-8").take(100)),
-            timestamp = Instant.now()
-          )
-          
-          // Unsafe run для callback из Netty
-          Unsafe.unsafe { implicit unsafe =>
-            Runtime.default.unsafe.run(
-              promise.succeed(result) *>
-              redisClient.publish(s"$RESULTS_CHANNEL_PREFIX$imei", result.toJson)
-            )
-          }
-          
-          found = true
+        _ <- maybeEntry match
+          case Some(pendingCmd) =>
+            for
+              result <- createResult(
+                pendingCmd.command,
+                CommandStatus.Acked,
+                Some(new String(response, "UTF-8").take(100))
+              )
+              // Завершаем Promise
+              _ <- pendingCmd.promise.succeed(result)
+              // Публикуем результат
+              _ <- redisClient.publish(s"$RESULTS_CHANNEL_PREFIX$imei", result.toJson)
+            yield ()
+          case None =>
+            ZIO.logDebug(s"No pending command found for IMEI: $imei")
+      yield ()
+    
+    /**
+     * Создает CommandResult с использованием ZIO Clock
+     */
+    private def createResult(
+        command: Command, 
+        status: CommandStatus, 
+        message: Option[String]
+    ): UIO[CommandResult] =
+      Clock.instant.map { now =>
+        CommandResult(
+          commandId = command.commandId,
+          imei = command.imei,
+          status = status,
+          message = message,
+          timestamp = now
+        )
       }
   
   /**
-   * ZIO Layer
+   * ZIO Layer - чисто функциональный
    */
   val live: ZLayer[RedisClient & ConnectionRegistry, Nothing, CommandService] =
     ZLayer {
       for
         redis <- ZIO.service[RedisClient]
         registry <- ZIO.service[ConnectionRegistry]
-        pendingCommands = new ConcurrentHashMap[String, Promise[Throwable, CommandResult]]()
-      yield Live(redis, registry, pendingCommands, 30.seconds)
+        pendingRef <- Ref.make(Map.empty[String, PendingCommand])
+      yield Live(redis, registry, pendingRef, 30.seconds)
     }

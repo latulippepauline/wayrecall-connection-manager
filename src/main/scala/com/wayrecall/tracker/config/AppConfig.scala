@@ -26,7 +26,9 @@ final case class TcpConfig(
     tcpNodelay: Boolean,
     connectionTimeoutSeconds: Int,
     readTimeoutSeconds: Int,
-    writeTimeoutSeconds: Int
+    writeTimeoutSeconds: Int,
+    idleTimeoutSeconds: Int,
+    idleCheckIntervalSeconds: Int
 )
 
 /**

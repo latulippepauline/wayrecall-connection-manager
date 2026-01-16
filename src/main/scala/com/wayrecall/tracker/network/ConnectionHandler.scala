@@ -241,6 +241,9 @@ class ConnectionHandler(
       imei <- ZIO.fromOption(state.imei).orElseFail(new Exception("IMEI не установлен"))
       vehicleId <- ZIO.fromOption(state.vehicleId).orElseFail(new Exception("VehicleId не установлен"))
       
+      // Обновляем время последней активности
+      _ <- registry.updateLastActivity(imei)
+      
       prevPosition = state.getPosition(vehicleId)
       result <- service.processDataPacket(buffer, imei, vehicleId, prevPosition)
       (validPoints, totalCount) = result

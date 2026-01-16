@@ -3,6 +3,41 @@ package com.wayrecall.tracker.domain
 import zio.json.*
 
 /**
+ * Географические расчёты - чистые функции
+ */
+object GeoMath:
+  
+  private val EarthRadiusKm: Double = 6371.0
+  
+  /**
+   * Вычисляет расстояние между двумя географическими точками в метрах
+   * Использует формулу Хаверсина (Haversine formula)
+   * 
+   * Complexity: O(1)
+   * Precision: ~0.5% на расстояниях до 1000 км
+   * 
+   * @param lat1 Широта первой точки (градусы)
+   * @param lon1 Долгота первой точки (градусы)
+   * @param lat2 Широта второй точки (градусы)
+   * @param lon2 Долгота второй точки (градусы)
+   * @return Расстояние в метрах
+   */
+  def haversineDistance(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double =
+    val latRad1 = Math.toRadians(lat1)
+    val latRad2 = Math.toRadians(lat2)
+    val deltaLatRad = Math.toRadians(lat2 - lat1)
+    val deltaLonRad = Math.toRadians(lon2 - lon1)
+    
+    val sinDeltaLat = Math.sin(deltaLatRad / 2)
+    val sinDeltaLon = Math.sin(deltaLonRad / 2)
+    
+    val a = sinDeltaLat * sinDeltaLat +
+            Math.cos(latRad1) * Math.cos(latRad2) * sinDeltaLon * sinDeltaLon
+    
+    val c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
+    EarthRadiusKm * c * 1000 // метры
+
+/**
  * GPS точка с координатами, высотой, скоростью и углом наклона
  */
 case class GpsPoint(
@@ -14,29 +49,14 @@ case class GpsPoint(
     angle: Int,            // градусы (0-360)
     satellites: Int,       // количество спутников
     timestamp: Long        // миллисекунды
-) derives JsonCodec {
+) derives JsonCodec:
   
   /**
    * Вычисляет расстояние между этой точкой и другой в метрах
    * Использует формулу Хаверсина
    */
-  def distanceTo(other: GpsPoint): Double = {
-    val earthRadiusKm = 6371.0
-    val latRad1 = Math.toRadians(latitude)
-    val latRad2 = Math.toRadians(other.latitude)
-    val deltaLatRad = Math.toRadians(other.latitude - latitude)
-    val deltaLonRad = Math.toRadians(other.longitude - longitude)
-    
-    val a = Math.sin(deltaLatRad / 2) * Math.sin(deltaLatRad / 2) +
-            Math.cos(latRad1) * Math.cos(latRad2) *
-            Math.sin(deltaLonRad / 2) * Math.sin(deltaLonRad / 2)
-    
-    val c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
-    val distance = earthRadiusKm * c * 1000 // в метрах
-    
-    distance
-  }
-}
+  def distanceTo(other: GpsPoint): Double =
+    GeoMath.haversineDistance(latitude, longitude, other.latitude, other.longitude)
 
 /**
  * Сырые GPS данные парсеные из протокола
@@ -50,7 +70,7 @@ case class GpsRawPoint(
     angle: Int,
     satellites: Int,
     timestamp: Long
-) {
+):
   /**
    * Преобразует сырую точку в валидную GpsPoint с vehicleId
    */
@@ -65,7 +85,12 @@ case class GpsRawPoint(
       satellites = satellites,
       timestamp = timestamp
     )
-}
+  
+  /**
+   * Вычисляет расстояние до другой точки
+   */
+  def distanceTo(other: GpsPoint): Double =
+    GeoMath.haversineDistance(latitude, longitude, other.latitude, other.longitude)
 
 /**
  * Информация о подключении трекера

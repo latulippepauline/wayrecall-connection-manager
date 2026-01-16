@@ -1,7 +1,7 @@
 package com.wayrecall.tracker.filter
 
 import zio.*
-import com.wayrecall.tracker.domain.{GpsRawPoint, GpsPoint, FilterError}
+import com.wayrecall.tracker.domain.{GpsRawPoint, GpsPoint, GeoMath, FilterError}
 import com.wayrecall.tracker.config.{DeadReckoningFilterConfig, DynamicConfigService, FilterConfig}
 
 /**
@@ -71,7 +71,8 @@ object DeadReckoningFilter:
       }
     
     private def validateNoTeleportation(point: GpsRawPoint, prev: GpsPoint, config: FilterConfig): IO[FilterError, Unit] =
-      val distance = calculateDistance(
+      // Используем GeoMath.haversineDistance вместо дублирования
+      val distance = GeoMath.haversineDistance(
         point.latitude, point.longitude,
         prev.latitude, prev.longitude
       )
@@ -82,23 +83,6 @@ object DeadReckoningFilter:
       ZIO.fail(FilterError.Teleportation(distance, maxDistance))
         .when(distance > maxDistance)
         .unit
-    
-    /**
-     * Формула Хаверсина для расчета расстояния между двумя точками
-     */
-    private def calculateDistance(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double =
-      val earthRadiusKm = 6371.0
-      val latRad1 = Math.toRadians(lat1)
-      val latRad2 = Math.toRadians(lat2)
-      val deltaLatRad = Math.toRadians(lat2 - lat1)
-      val deltaLonRad = Math.toRadians(lon2 - lon1)
-      
-      val a = Math.sin(deltaLatRad / 2) * Math.sin(deltaLatRad / 2) +
-              Math.cos(latRad1) * Math.cos(latRad2) *
-              Math.sin(deltaLonRad / 2) * Math.sin(deltaLonRad / 2)
-      
-      val c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
-      earthRadiusKm * c * 1000 // метры
   
   /**
    * ZIO Layer с динамической конфигурацией

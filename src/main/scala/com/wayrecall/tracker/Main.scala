@@ -3,7 +3,7 @@ package com.wayrecall.tracker
 import zio.*
 import zio.logging.backend.SLF4J
 import com.wayrecall.tracker.config.*
-import com.wayrecall.tracker.network.{TcpServer, ConnectionHandler, GpsProcessingService, ConnectionRegistry, CommandService}
+import com.wayrecall.tracker.network.{TcpServer, ConnectionHandler, GpsProcessingService, ConnectionRegistry, CommandService, IdleConnectionWatcher}
 import com.wayrecall.tracker.protocol.{ProtocolParser, TeltonikaParser, WialonParser, RuptelaParser, NavTelecomParser}
 import com.wayrecall.tracker.storage.{RedisClient, KafkaProducer}
 import com.wayrecall.tracker.filter.{DeadReckoningFilter, StationaryFilter}
@@ -12,7 +12,9 @@ import com.wayrecall.tracker.api.HttpApi
 /**
  * Точка входа Connection Manager Service
  * 
- * Использует ZIO Layer для композиции всех зависимостей
+ * ✅ Чисто функциональный - ZIO Layer для композиции зависимостей
+ * ✅ Нет mutable state - используем Ref
+ * ✅ Graceful shutdown при SIGTERM
  */
 object Main extends ZIOAppDefault:
   
@@ -24,7 +26,7 @@ object Main extends ZIOAppDefault:
    * Основная программа - чисто декларативная
    */
   val program: ZIO[
-    AppConfig & TcpServer & GpsProcessingService & ConnectionRegistry & CommandService & DynamicConfigService,
+    AppConfig & TcpServer & GpsProcessingService & ConnectionRegistry & CommandService & DynamicConfigService & IdleConnectionWatcher,
     Throwable, Unit
   ] =
     for
@@ -34,9 +36,10 @@ object Main extends ZIOAppDefault:
       registry <- ZIO.service[ConnectionRegistry]
       commandService <- ZIO.service[CommandService]
       dynamicConfig <- ZIO.service[DynamicConfigService]
+      idleWatcher <- ZIO.service[IdleConnectionWatcher]
       runtime <- ZIO.runtime[Any]
       
-      _ <- ZIO.logInfo("=== Connection Manager Service v2.0 ===")
+      _ <- ZIO.logInfo("=== Connection Manager Service v2.1 (Pure FP) ===")
       _ <- ZIO.logInfo(s"Teltonika: порт ${config.tcp.teltonika.port} (enabled: ${config.tcp.teltonika.enabled})")
       _ <- ZIO.logInfo(s"Wialon: порт ${config.tcp.wialon.port} (enabled: ${config.tcp.wialon.enabled})")
       _ <- ZIO.logInfo(s"Ruptela: порт ${config.tcp.ruptela.port} (enabled: ${config.tcp.ruptela.enabled})")
@@ -44,6 +47,7 @@ object Main extends ZIOAppDefault:
       _ <- ZIO.logInfo(s"HTTP API: порт ${config.http.port}")
       _ <- ZIO.logInfo(s"Redis: ${config.redis.host}:${config.redis.port}")
       _ <- ZIO.logInfo(s"Kafka: ${config.kafka.bootstrapServers}")
+      _ <- ZIO.logInfo(s"Idle timeout: ${config.tcp.idleTimeoutSeconds}s, check interval: ${config.tcp.idleCheckIntervalSeconds}s")
       
       // Получаем текущую конфигурацию фильтров
       filterConfig <- dynamicConfig.getFilterConfig
@@ -68,6 +72,10 @@ object Main extends ZIOAppDefault:
       // Запускаем слушатель команд из Redis
       _ <- commandService.startCommandListener.forkDaemon
       _ <- ZIO.logInfo("✓ Command listener started")
+      
+      // Запускаем мониторинг idle соединений
+      _ <- idleWatcher.start
+      _ <- ZIO.logInfo("✓ Idle connection watcher started")
       
       // Запускаем HTTP API (в отдельном fiber)
       httpFiber <- HttpApi.server(config.http.port)
@@ -104,7 +112,7 @@ object Main extends ZIOAppDefault:
    * Композиция всех слоёв приложения
    */
   val appLayer: ZLayer[Any, Throwable, 
-    AppConfig & TcpServer & GpsProcessingService & ConnectionRegistry & CommandService & DynamicConfigService
+    AppConfig & TcpServer & GpsProcessingService & ConnectionRegistry & CommandService & DynamicConfigService & IdleConnectionWatcher
   ] =
     // Базовые слои
     val configLayer = AppConfig.live
@@ -137,8 +145,11 @@ object Main extends ZIOAppDefault:
     // Слой сервиса команд
     val commandServiceLayer = (redisLayer ++ registryLayer) >>> CommandService.live
     
+    // Слой мониторинга idle соединений
+    val idleWatcherLayer = (registryLayer ++ dynamicConfigLayer ++ tcpConfigLayer) >>> IdleConnectionWatcher.live
+    
     // Финальная композиция
-    configLayer ++ tcpServerLayer ++ processingServiceLayer ++ registryLayer ++ commandServiceLayer ++ dynamicConfigLayer
+    configLayer ++ tcpServerLayer ++ processingServiceLayer ++ registryLayer ++ commandServiceLayer ++ dynamicConfigLayer ++ idleWatcherLayer
   
   override def run: ZIO[Any, Any, Any] =
     program
