@@ -16,10 +16,11 @@ import java.net.InetSocketAddress
 final case class ConnectionState(
     imei: Option[String] = None,
     vehicleId: Option[Long] = None,
+    connectedAt: Long = 0L,
     positionCache: Map[Long, GpsPoint] = Map.empty
 ):
-  def withImei(newImei: String, vid: Long): ConnectionState =
-    copy(imei = Some(newImei), vehicleId = Some(vid))
+  def withImei(newImei: String, vid: Long, timestamp: Long): ConnectionState =
+    copy(imei = Some(newImei), vehicleId = Some(vid), connectedAt = timestamp)
   
   def updatePosition(vid: Long, point: GpsPoint): ConnectionState =
     copy(positionCache = positionCache.updated(vid, point))
@@ -45,7 +46,7 @@ trait GpsProcessingService:
   
   def onConnect(imei: String, vehicleId: Long, remoteAddress: InetSocketAddress): UIO[Unit]
   
-  def onDisconnect(imei: String, vehicleId: Long): UIO[Unit]
+  def onDisconnect(imei: String, vehicleId: Long, reason: DisconnectReason, connectedAt: Long): UIO[Unit]
 
 object GpsProcessingService:
   
@@ -139,17 +140,20 @@ object GpsProcessingService:
       
       effect.ignore
     
-    override def onDisconnect(imei: String, vehicleId: Long): UIO[Unit] =
+    override def onDisconnect(imei: String, vehicleId: Long, reason: DisconnectReason, connectedAt: Long): UIO[Unit] =
       val effect = for
         now <- Clock.currentTime(java.util.concurrent.TimeUnit.MILLISECONDS)
+        sessionDurationMs = now - connectedAt
         _ <- redisClient.unregisterConnection(imei)
         _ <- kafkaProducer.publishDeviceStatus(DeviceStatus(
           imei = imei,
           vehicleId = vehicleId,
           isOnline = false,
-          lastSeen = now
+          lastSeen = now,
+          disconnectReason = Some(reason),
+          sessionDurationMs = Some(sessionDurationMs)
         ))
-        _ <- ZIO.logInfo(s"Устройство отключено: IMEI=$imei")
+        _ <- ZIO.logInfo(s"Устройство отключено: IMEI=$imei, reason=$reason, session=${sessionDurationMs / 1000}s")
       yield ()
       
       effect.ignore
@@ -203,10 +207,11 @@ class ConnectionHandler(
     val effect = for
       result <- service.processImeiPacket(buffer, remoteAddr)
       (imei, vehicleId, prevPosition) = result
+      now <- Clock.currentTime(java.util.concurrent.TimeUnit.MILLISECONDS)
       
-      // Обновляем состояние
+      // Обновляем состояние с временем подключения
       _ <- stateRef.update { state =>
-        val updated = state.withImei(imei, vehicleId)
+        val updated = state.withImei(imei, vehicleId, now)
         prevPosition.fold(updated)(pos => updated.updatePosition(vehicleId, pos))
       }
       
@@ -275,9 +280,9 @@ class ConnectionHandler(
       state <- stateRef.get
       _ <- (state.imei, state.vehicleId) match
         case (Some(imei), Some(vid)) =>
-          // Удаляем из реестра
+          // Удаляем из реестра и уведомляем о graceful disconnect
           registry.unregister(imei) *>
-          service.onDisconnect(imei, vid)
+          service.onDisconnect(imei, vid, DisconnectReason.GracefulClose, state.connectedAt)
         case _ => ZIO.unit
       _ <- ZIO.logInfo(s"Соединение закрыто: ${ctx.channel().remoteAddress()}")
     yield ()

@@ -145,8 +145,8 @@ object Main extends ZIOAppDefault:
     // Слой сервиса команд
     val commandServiceLayer = (redisLayer ++ registryLayer) >>> CommandService.live
     
-    // Слой мониторинга idle соединений
-    val idleWatcherLayer = (registryLayer ++ dynamicConfigLayer ++ tcpConfigLayer) >>> IdleConnectionWatcher.live
+    // Слой мониторинга idle соединений (теперь с Kafka и Redis для уведомлений)
+    val idleWatcherLayer = (registryLayer ++ dynamicConfigLayer ++ kafkaLayer ++ redisLayer ++ tcpConfigLayer) >>> IdleConnectionWatcher.live
     
     // Финальная композиция
     configLayer ++ tcpServerLayer ++ processingServiceLayer ++ registryLayer ++ commandServiceLayer ++ dynamicConfigLayer ++ idleWatcherLayer

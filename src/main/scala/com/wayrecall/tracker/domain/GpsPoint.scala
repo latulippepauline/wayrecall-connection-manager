@@ -113,6 +113,19 @@ case class Vehicle(
 ) derives JsonCodec
 
 /**
+ * Причина отключения трекера
+ */
+enum DisconnectReason derives JsonCodec:
+  case GracefulClose      // Трекер сам закрыл соединение (норма)
+  case IdleTimeout        // Принудительно отключён из-за неактивности
+  case ReadTimeout        // Timeout на чтение данных (Netty)
+  case WriteTimeout       // Timeout на запись данных (Netty)
+  case ConnectionReset    // TCP reset (сетевая проблема)
+  case ProtocolError      // Ошибка парсинга протокола
+  case ServerShutdown     // Сервер остановлен
+  case Unknown            // Неизвестная причина
+
+/**
  * Статус устройства
  */
 case class DeviceStatus(
@@ -121,7 +134,9 @@ case class DeviceStatus(
     isOnline: Boolean,
     lastSeen: Long,
     lastLatitude: Option[Double] = None,
-    lastLongitude: Option[Double] = None
+    lastLongitude: Option[Double] = None,
+    disconnectReason: Option[DisconnectReason] = None,  // Причина отключения (только когда isOnline = false)
+    sessionDurationMs: Option[Long] = None              // Длительность сессии (только при отключении)
 ) derives JsonCodec
 
 /**
