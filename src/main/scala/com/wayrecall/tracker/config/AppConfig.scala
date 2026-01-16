@@ -17,6 +17,7 @@ final case class TcpProtocolConfig(
 final case class TcpConfig(
     teltonika: TcpProtocolConfig,
     wialon: TcpProtocolConfig,
+    ruptela: TcpProtocolConfig,
     navtelecom: TcpProtocolConfig,
     bossThreads: Int,
     workerThreads: Int,
@@ -83,6 +84,25 @@ final case class FiltersConfig(
 )
 
 /**
+ * Конфигурация HTTP API
+ */
+final case class HttpConfig(
+    port: Int,
+    host: String
+)
+
+/**
+ * Конфигурация команд
+ */
+final case class CommandsConfig(
+    enabled: Boolean,
+    timeoutSeconds: Int,
+    maxRetries: Int,
+    redisChannelPattern: String,
+    resultsChannelPrefix: String
+)
+
+/**
  * Конфигурация логирования
  */
 final case class LoggingConfig(
@@ -95,9 +115,11 @@ final case class LoggingConfig(
  */
 final case class AppConfig(
     tcp: TcpConfig,
+    http: HttpConfig,
     redis: RedisConfig,
     kafka: KafkaConfig,
     filters: FiltersConfig,
+    commands: CommandsConfig,
     logging: LoggingConfig
 )
 

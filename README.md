@@ -5,7 +5,10 @@ GPS трекинг сервис для обработки данных от GPS 
 ## 🎯 Возможности
 
 - Persistent TCP соединения с GPS трекерами (1000-5000 подключений)
-- Поддержка протоколов: **Teltonika Codec 8/8E**, Wialon IPS
+- **4 протокола:** Teltonika Codec 8/8E, Wialon IPS, Ruptela, NavTelecom
+- **Отправка команд** на трекеры через Redis Pub/Sub
+- **Динамическая конфигурация** фильтров без перезапуска
+- HTTP API для мониторинга и управления
 - Парсинг GPS координат и метаданных
 - Фильтрация невалидных точек (Dead Reckoning Filter)
 - Фильтрация стационарных точек (Stationary Filter)
@@ -25,23 +28,32 @@ connection-manager/
 │   ├── main/
 │   │   ├── scala/com/wayrecall/tracker/
 │   │   │   ├── Main.scala                 # Точка входа
+│   │   │   ├── api/
+│   │   │   │   └── HttpApi.scala          # HTTP API
 │   │   │   ├── config/
-│   │   │   │   └── AppConfig.scala        # Конфигурация
+│   │   │   │   ├── AppConfig.scala        # Статическая конфигурация
+│   │   │   │   └── DynamicConfigService.scala # Динамическая конфигурация
 │   │   │   ├── domain/
 │   │   │   │   ├── GpsPoint.scala         # GPS точка
+│   │   │   │   ├── Command.scala          # Команды на трекеры
 │   │   │   │   ├── Vehicle.scala          # Транспорт
 │   │   │   │   └── Protocol.scala         # Enums и ошибки
 │   │   │   ├── network/
 │   │   │   │   ├── TcpServer.scala        # Netty TCP сервер
-│   │   │   │   └── ConnectionHandler.scala # Обработчик соединений
+│   │   │   │   ├── ConnectionHandler.scala # Обработчик соединений
+│   │   │   │   ├── ConnectionRegistry.scala # Реестр соединений
+│   │   │   │   └── CommandService.scala   # Сервис команд
 │   │   │   ├── protocol/
 │   │   │   │   ├── ProtocolParser.scala   # Интерфейс парсеров
-│   │   │   │   └── TeltonikaParser.scala  # Teltonika Codec 8/8E
+│   │   │   │   ├── TeltonikaParser.scala  # Teltonika Codec 8/8E/12
+│   │   │   │   ├── WialonParser.scala     # Wialon IPS
+│   │   │   │   ├── RuptelaParser.scala    # Ruptela
+│   │   │   │   └── NavTelecomParser.scala # NavTelecom FLEX
 │   │   │   ├── filter/
 │   │   │   │   ├── DeadReckoningFilter.scala # Валидация координат
 │   │   │   │   └── StationaryFilter.scala    # Фильтр стоянок
 │   │   │   └── storage/
-│   │   │       ├── RedisClient.scala      # Redis клиент
+│   │   │       ├── RedisClient.scala      # Redis клиент + Pub/Sub
 │   │   │       └── KafkaProducer.scala    # Kafka продюсер
 │   │   └── resources/
 │   │       ├── application.conf           # Конфигурация
@@ -77,6 +89,44 @@ sbt run
 sbt test
 ```
 
+## 🌐 HTTP API
+
+```bash
+# Health check
+curl http://localhost:8080/api/health
+
+# Получить конфигурацию фильтров
+curl http://localhost:8080/api/config/filters
+
+# Обновить конфигурацию фильтров (без перезапуска!)
+curl -X PUT http://localhost:8080/api/config/filters \
+  -H "Content-Type: application/json" \
+  -d '{
+    "deadReckoningMaxSpeedKmh": 250,
+    "stationaryMinDistanceMeters": 30
+  }'
+
+# Список активных соединений
+curl http://localhost:8080/api/connections
+
+# Отправить команду на трекер
+curl -X POST http://localhost:8080/api/commands/reboot/352093082745395
+
+# Запросить текущую позицию
+curl -X POST http://localhost:8080/api/commands/position/352093082745395
+```
+
+## 📊 Redis Keys Schema
+
+| Key Pattern | Type | TTL | Описание | Пример значения |
+|------------|------|-----|----------|-----------------|
+| `vehicle:{imei}` | String | 1h | IMEI → vehicle_id | `"42"` |
+| `position:{vehicle_id}` | String (JSON) | 1h | Последняя позиция | `{"vehicleId":42,...}` |
+| `connection:{imei}` | String (JSON) | - | Информация о подключении | `{"imei":"352...",...}` |
+| `config:filters` | Hash | - | Динамические настройки фильтров | См. ниже |
+| `commands:{imei}` | Pub/Sub | - | Команды на трекер | JSON команды |
+| `command-results:{imei}` | Pub/Sub | - | Результаты команд | JSON результаты |
+
 ## ⚙️ Конфигурация
 
 Конфигурация находится в `src/main/resources/application.conf`:
@@ -86,9 +136,15 @@ connection-manager {
   tcp {
     teltonika { port = 5001, enabled = true }
     wialon { port = 5002, enabled = true }
+    ruptela { port = 5003, enabled = true }
+    navtelecom { port = 5004, enabled = true }
     boss-threads = 1
     worker-threads = 4
     max-connections = 5000
+  }
+  
+  http {
+    port = 8080
   }
   
   redis {

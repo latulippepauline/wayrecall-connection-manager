@@ -105,7 +105,7 @@ object GpsProcessingService:
         point = raw.toValidated(vehicleId)
         
         // Определяем, нужно ли публиковать в Kafka
-        shouldPublish = stationaryFilter.shouldPublish(point, prev)
+        shouldPublish <- stationaryFilter.shouldPublish(point, prev)
         
         // Сохраняем в Redis (всегда, для фронтенда)
         _ <- redisClient.setPosition(point)
@@ -175,6 +175,7 @@ object GpsProcessingService:
 class ConnectionHandler(
     service: GpsProcessingService,
     parser: ProtocolParser,
+    registry: ConnectionRegistry,
     runtime: Runtime[Any]
 ) extends ChannelInboundHandlerAdapter:
   
@@ -209,7 +210,10 @@ class ConnectionHandler(
         prevPosition.fold(updated)(pos => updated.updatePosition(vehicleId, pos))
       }
       
-      // Регистрируем подключение
+      // Регистрируем подключение в реестре
+      _ <- registry.register(imei, ctx, parser)
+      
+      // Регистрируем подключение в Redis/Kafka
       _ <- service.onConnect(imei, vehicleId, remoteAddr)
       
       // Отправляем ACK
@@ -267,7 +271,10 @@ class ConnectionHandler(
     val effect = for
       state <- stateRef.get
       _ <- (state.imei, state.vehicleId) match
-        case (Some(imei), Some(vid)) => service.onDisconnect(imei, vid)
+        case (Some(imei), Some(vid)) =>
+          // Удаляем из реестра
+          registry.unregister(imei) *>
+          service.onDisconnect(imei, vid)
         case _ => ZIO.unit
       _ <- ZIO.logInfo(s"Соединение закрыто: ${ctx.channel().remoteAddress()}")
     yield ()
@@ -291,6 +298,7 @@ object ConnectionHandler:
   def factory(
       service: GpsProcessingService,
       parser: ProtocolParser,
+      registry: ConnectionRegistry,
       runtime: Runtime[Any]
   ): () => ConnectionHandler =
-    () => new ConnectionHandler(service, parser, runtime)
+    () => new ConnectionHandler(service, parser, registry, runtime)

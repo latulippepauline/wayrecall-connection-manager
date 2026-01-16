@@ -4,7 +4,7 @@ import zio.*
 import zio.test.*
 import zio.test.Assertion.*
 import com.wayrecall.tracker.domain.GpsPoint
-import com.wayrecall.tracker.config.StationaryFilterConfig
+import com.wayrecall.tracker.config.{FilterConfig, DynamicConfigService}
 
 /**
  * Тесты для StationaryFilter
@@ -12,12 +12,23 @@ import com.wayrecall.tracker.config.StationaryFilterConfig
 object StationaryFilterSpec extends ZIOSpecDefault:
   
   // Тестовая конфигурация
-  val testConfig = StationaryFilterConfig(
-    minDistanceMeters = 20,
-    minSpeedKmh = 2
+  val testFilterConfig = FilterConfig(
+    deadReckoningMaxSpeedKmh = 300,
+    deadReckoningMaxJumpMeters = 1000,
+    deadReckoningMaxJumpSeconds = 1,
+    stationaryMinDistanceMeters = 20,
+    stationaryMinSpeedKmh = 2
   )
   
-  val filter = StationaryFilter.Live(testConfig)
+  // Mock DynamicConfigService для тестов
+  val testConfigServiceLayer: ULayer[DynamicConfigService] =
+    ZLayer.succeed(new DynamicConfigService:
+      def getFilterConfig: UIO[FilterConfig] = ZIO.succeed(testFilterConfig)
+      def updateFilterConfig(config: FilterConfig): Task[Unit] = ZIO.unit
+      def subscribeToChanges: Task[Unit] = ZIO.unit
+    )
+  
+  val filterLayer = testConfigServiceLayer >>> StationaryFilter.live
   
   // Базовая точка для тестов (Москва)
   def basePoint(vehicleId: Long = 1L, speed: Int = 0): GpsPoint = GpsPoint(
@@ -35,7 +46,10 @@ object StationaryFilterSpec extends ZIOSpecDefault:
     
     test("публикует первую точку когда prev = None") {
       val point = basePoint()
-      assertTrue(filter.shouldPublish(point, None))
+      for
+        filter <- ZIO.service[StationaryFilter]
+        result <- filter.shouldPublish(point, None)
+      yield assertTrue(result)
     },
     
     test("не публикует если стоим на месте (малое расстояние + низкая скорость)") {
@@ -45,7 +59,10 @@ object StationaryFilterSpec extends ZIOSpecDefault:
         latitude = prev.latitude + 0.00009,
         speed = 0
       )
-      assertTrue(!filter.shouldPublish(point, Some(prev)))
+      for
+        filter <- ZIO.service[StationaryFilter]
+        result <- filter.shouldPublish(point, Some(prev))
+      yield assertTrue(!result)
     },
     
     test("публикует если расстояние >= минимального") {
@@ -55,14 +72,20 @@ object StationaryFilterSpec extends ZIOSpecDefault:
         latitude = prev.latitude + 0.00045,
         speed = 0
       )
-      assertTrue(filter.shouldPublish(point, Some(prev)))
+      for
+        filter <- ZIO.service[StationaryFilter]
+        result <- filter.shouldPublish(point, Some(prev))
+      yield assertTrue(result)
     },
     
     test("публикует если скорость >= минимальной") {
       val prev = basePoint()
       // Та же позиция, но скорость > 2 км/ч
       val point = prev.copy(speed = 5)
-      assertTrue(filter.shouldPublish(point, Some(prev)))
+      for
+        filter <- ZIO.service[StationaryFilter]
+        result <- filter.shouldPublish(point, Some(prev))
+      yield assertTrue(result)
     },
     
     test("не публикует при малом расстоянии И низкой скорости") {
@@ -72,7 +95,10 @@ object StationaryFilterSpec extends ZIOSpecDefault:
         latitude = prev.latitude + 0.00005,
         speed = 1
       )
-      assertTrue(!filter.shouldPublish(point, Some(prev)))
+      for
+        filter <- ZIO.service[StationaryFilter]
+        result <- filter.shouldPublish(point, Some(prev))
+      yield assertTrue(!result)
     },
     
     test("публикует при большом расстоянии даже с нулевой скоростью") {
@@ -82,6 +108,9 @@ object StationaryFilterSpec extends ZIOSpecDefault:
         latitude = prev.latitude + 0.0009,
         speed = 0
       )
-      assertTrue(filter.shouldPublish(point, Some(prev)))
+      for
+        filter <- ZIO.service[StationaryFilter]
+        result <- filter.shouldPublish(point, Some(prev))
+      yield assertTrue(result)
     }
-  )
+  ).provideLayerShared(filterLayer)

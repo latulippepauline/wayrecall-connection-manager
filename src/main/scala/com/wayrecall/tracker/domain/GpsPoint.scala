@@ -98,3 +98,12 @@ case class DeviceStatus(
     lastLatitude: Option[Double] = None,
     lastLongitude: Option[Double] = None
 ) derives JsonCodec
+
+/**
+ * Extension methods для GpsPoint
+ */
+extension (p1: GpsPoint)
+  /**
+   * Alias для distanceTo - вычисляет расстояние до другой точки по формуле Haversine (в метрах)
+   */
+  def distance(p2: GpsPoint): Double = p1.distanceTo(p2)

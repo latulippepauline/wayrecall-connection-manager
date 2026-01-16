@@ -25,7 +25,10 @@ lazy val root = project
       "io.netty" % "netty-all" % nettyVersion,
       
       // Redis (Lettuce)
-      "io.lettuce" % "lettuce-core" % "6.3.0.RELEASE",
+      "io.lettuce" % "lettuce-core" % "6.3.2.RELEASE",
+      
+      // HTTP (zio-http)
+      "dev.zio" %% "zio-http" % "3.0.0-RC4",
       
       // Kafka
       "org.apache.kafka" % "kafka-clients" % "3.6.1",
